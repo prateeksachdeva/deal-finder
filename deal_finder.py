@@ -4,7 +4,7 @@ import os
 import re
 
 # ============================================================
-#   CONFIGURATION
+#   CONFIGURATION — Loaded from GitHub Secrets automatically
 # ============================================================
 TELEGRAM_BOT_TOKEN  = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID", "")
@@ -12,52 +12,30 @@ TOP_DEALS_COUNT     = 5
 # ============================================================
 
 # ────────────────────────────────────────────────────────────
-# BLOG ARTICLE FILTERS — Skip these, they are NOT real deals
+# POPULAR INDIAN DEAL TELEGRAM CHANNELS
+# These channels post real Amazon.in + Flipkart deals in ₹
+# RSSHub converts them to RSS feed — works from ANYWHERE
 # ────────────────────────────────────────────────────────────
-BLOG_PATTERNS = [
-    r'^top\s+\d+',           # "Top 15 deals..."
-    r'^best\s+\d+',          # "Best 10 products..."
-    r'biggest sales',
-    r'you can\'t miss',
-    r'shop smarter',
-    r'step into style',
-    r'light up your',
-    r'how to',
-    r'guide to',
-    r'tips for',
-    r'ways to',
-    r'things you',
-    r'reasons why',
-    r'everything you',
-    r'all you need',
-    r'what is',
-    r'why you should',
-    r'festival.*deals',      # "Diwali deals guide"
-    r'sale.*\d{4}',          # "Big Billion Days 2025"
-    r'\d+ deals',            # "15 deals you..."
-    r'\d+ things',
-    r'\d+ best',
-    r'\d+ ways',
+DEAL_CHANNELS = [
+    ("Loot Deals India",    "lootdealsindia"),
+    ("Deals4India",         "Deals4India"),
+    ("Amazon Deals India",  "amazondealsinindia"),
+    ("Flipkart Offers",     "flipkartofferss"),
+    ("India Loot",          "indialootofficial"),
+    ("Deal Baba",           "dealbaba_in"),
+    ("Loot Lo",             "lootlo"),
 ]
 
-def is_blog_article(title: str) -> bool:
-    t = title.lower().strip()
-    return any(re.search(p, t) for p in BLOG_PATTERNS)
+BLOG_SKIP_WORDS = [
+    "top 10", "top 15", "top 20", "best deals of", "biggest sale",
+    "how to", "guide", "tips", "ways to", "things you", "you should",
+    "everything you", "what is", "why you"
+]
 
-# ────────────────────────────────────────────────────────────
-# REAL DEAL INDICATORS — Must have at least one of these
-# ────────────────────────────────────────────────────────────
-def is_real_product_deal(title: str, desc: str) -> bool:
-    combined = (title + " " + desc).lower()
-    # Must mention price or discount
-    has_price    = bool(re.search(r'₹|rs\.|inr|rupee', combined))
-    has_discount = bool(re.search(r'\d+\s*%\s*off|discount|deal price|loot', combined))
-    has_platform = "amazon" in combined or "flipkart" in combined
-    return (has_price or has_discount) and has_platform
+def is_blog(text: str) -> bool:
+    t = text.lower()
+    return any(w in t for w in BLOG_SKIP_WORDS)
 
-# ────────────────────────────────────────────────────────────
-# HELPERS
-# ────────────────────────────────────────────────────────────
 def extract_discount(text: str) -> int:
     matches = re.findall(r'(\d{1,3})\s*%\s*off', text.lower())
     if matches:
@@ -105,73 +83,90 @@ def send_to_telegram(message: str):
 
 
 # ────────────────────────────────────────────────────────────
-# DESIDIME — India's Biggest Real Deal Community
-# People post actual products with MRP, deal price, % off
-# Example: "boAt Airdopes 141 at ₹999 (MRP ₹4499) 78% off Amazon"
+# FETCH DEALS FROM TELEGRAM CHANNELS VIA RSSHUB
+# RSSHub converts any public Telegram channel to RSS
+# Works globally from any server including GitHub Actions
 # ────────────────────────────────────────────────────────────
-def fetch_desidime() -> list:
-    print("\n🔍 Fetching Desidime real product deals...")
+def fetch_telegram_channels() -> list:
+    print("\n🔍 Reading Indian deal Telegram channels via RSSHub...")
     deals = []
 
-    feeds = [
-        ("All Deals",      "https://www.desidime.com/deals.rss"),
-        ("Electronics",    "https://www.desidime.com/selective_search/electronics.rss"),
-        ("Mobiles",        "https://www.desidime.com/selective_search/mobiles.rss"),
-        ("Fashion",        "https://www.desidime.com/selective_search/fashion.rss"),
-        ("Home Kitchen",   "https://www.desidime.com/selective_search/home-kitchen.rss"),
-        ("Freebies",       "https://www.desidime.com/selective_search/freebies.rss"),
-        ("Grocery",        "https://www.desidime.com/selective_search/grocery.rss"),
-        ("Sports",         "https://www.desidime.com/selective_search/sports-fitness.rss"),
+    # RSSHub public instances — try each one
+    rsshub_instances = [
+        "https://rsshub.app",
+        "https://rss.shab.fun",
+        "https://rsshub.woodland.cafe",
     ]
 
-    for name, url in feeds:
-        try:
-            r    = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-            soup = BeautifulSoup(r.text, "xml")
-            items = soup.find_all("item")
-            print(f"   [{name}] → {len(items)} items")
+    for channel_name, channel_id in DEAL_CHANNELS:
+        fetched = False
+        for instance in rsshub_instances:
+            try:
+                url      = f"{instance}/telegram/channel/{channel_id}"
+                r        = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+                soup     = BeautifulSoup(r.text, "xml")
+                items    = soup.find_all("item")
 
-            for item in items:
-                try:
-                    title = item.find("title").get_text(strip=True)      if item.find("title")       else ""
-                    link  = item.find("link").get_text(strip=True)        if item.find("link")        else ""
-                    desc  = item.find("description").get_text(strip=True) if item.find("description") else ""
-                    combined = title + " " + desc
-
-                    # ✅ STRICT FILTERS — Skip blog articles
-                    if is_blog_article(title):
-                        continue
-
-                    # ✅ Must be a real product deal
-                    if not is_real_product_deal(title, desc):
-                        continue
-
-                    discount = extract_discount(combined)
-                    prices   = extract_prices_inr(combined)
-
-                    deal_price     = prices[0]  if len(prices) >= 1 else None
-                    original_price = prices[-1] if len(prices) >= 2 else None
-
-                    if discount == 0 and deal_price and original_price:
-                        discount = calculate_discount(deal_price, original_price)
-
-                    deals.append({
-                        "title"         : title[:80],
-                        "link"          : link,
-                        "discount"      : discount,
-                        "deal_price"    : deal_price,
-                        "original_price": original_price,
-                        "platform"      : get_platform(combined),
-                        "source"        : f"Desidime/{name}"
-                    })
-
-                except:
+                if not items:
                     continue
 
-        except Exception as e:
-            print(f"   ❌ {name} error: {e}")
+                print(f"   [{channel_name}] → {len(items)} posts")
 
-    print(f"\n   ✅ Total real deals from Desidime: {len(deals)}")
+                for item in items:
+                    try:
+                        title    = item.find("title").get_text(strip=True)      if item.find("title")       else ""
+                        link     = item.find("link").get_text(strip=True)        if item.find("link")        else ""
+                        desc     = item.find("description").get_text(strip=True) if item.find("description") else ""
+                        combined = title + " " + desc
+
+                        # Skip blog articles
+                        if is_blog(title):
+                            continue
+
+                        # Must mention Amazon or Flipkart
+                        if "amazon" not in combined.lower() and "flipkart" not in combined.lower():
+                            continue
+
+                        # Must have price in ₹ or discount %
+                        has_price    = bool(re.search(r'₹|rs\.|inr', combined.lower()))
+                        has_discount = bool(re.search(r'\d+\s*%\s*off', combined.lower()))
+                        if not has_price and not has_discount:
+                            continue
+
+                        discount = extract_discount(combined)
+                        prices   = extract_prices_inr(combined)
+                        deal_price     = prices[0]  if len(prices) >= 1 else None
+                        original_price = prices[-1] if len(prices) >= 2 else None
+
+                        if discount == 0 and deal_price and original_price:
+                            discount = calculate_discount(deal_price, original_price)
+
+                        # Use description as title if title is empty/generic
+                        display_title = desc[:80] if len(title) < 10 else title[:80]
+
+                        deals.append({
+                            "title"         : display_title,
+                            "link"          : link,
+                            "discount"      : discount,
+                            "deal_price"    : deal_price,
+                            "original_price": original_price,
+                            "platform"      : get_platform(combined),
+                            "source"        : channel_name
+                        })
+
+                    except:
+                        continue
+
+                fetched = True
+                break  # Stop trying other instances if this one worked
+
+            except Exception as e:
+                continue
+
+        if not fetched:
+            print(f"   ❌ Could not fetch {channel_name}")
+
+    print(f"\n   ✅ Total real deals collected: {len(deals)}")
     return deals
 
 
@@ -197,6 +192,7 @@ def send_top5(deals: list):
             message += f"📉 You Save: <b>{deal['discount']}% OFF</b>\n"
 
         message += f"🛒 <a href='{deal['link']}'>Buy Now →</a>\n"
+        message += f"📡 Via: {deal['source']}\n"
         message += "━━━━━━━━━━━━━━━━━━━━━\n\n"
 
     message += "⏰ <i>Next scan in 6 hours!</i>"
@@ -208,22 +204,22 @@ def send_top5(deals: list):
 # ────────────────────────────────────────────────────────────
 def main():
     print("\n" + "="*50)
-    print("🚀 India Deal Finder — Real Products Only!")
-    print(f"   Source    : Desidime (Real community deals)")
+    print("🚀 India Deal Finder — Telegram Channels Method!")
+    print(f"   Source    : Indian Deal Telegram Channels")
+    print(f"   Via       : RSSHub (works from GitHub servers)")
     print(f"   Market    : Amazon India + Flipkart (₹ only)")
-    print(f"   Filter    : Blog articles removed automatically")
-    print(f"   Top Deals : {TOP_DEALS_COUNT} per run — 1 Telegram message")
+    print(f"   Top Deals : {TOP_DEALS_COUNT} per run — 1 message only")
     print(f"   Channel   : {TELEGRAM_CHANNEL_ID}")
     print("="*50)
 
-    all_deals = fetch_desidime()
+    all_deals = fetch_telegram_channels()
 
     print(f"\n📊 Real product deals collected: {len(all_deals)}")
 
     if not all_deals:
         send_to_telegram(
             "ℹ️ <b>Scan Complete!</b>\n"
-            "No product deals found this round.\n"
+            "No deals found this round.\n"
             "🕐 Will check again in 6 hours!"
         )
         return
@@ -231,7 +227,7 @@ def main():
     # Sort by highest discount first
     all_deals.sort(key=lambda x: x["discount"], reverse=True)
 
-    # Remove duplicate titles
+    # Remove duplicates
     seen, unique = set(), []
     for deal in all_deals:
         key = deal["title"][:25].lower().strip()
