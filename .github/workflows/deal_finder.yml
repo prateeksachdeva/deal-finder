@@ -1,0 +1,29 @@
+name: Deal Finder Bot
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # Runs every 6 hours automatically
+  workflow_dispatch:          # Also allows manual run anytime
+
+jobs:
+  find-deals:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install requests beautifulsoup4 lxml
+
+      - name: Run Deal Finder
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+        run: python deal_finder.py
