@@ -4,15 +4,56 @@ import os
 import re
 
 # ============================================================
-#   CONFIGURATION — Loaded from GitHub Secrets automatically
+#   CONFIGURATION
 # ============================================================
 TELEGRAM_BOT_TOKEN  = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID", "")
 TOP_DEALS_COUNT     = 5
 # ============================================================
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+# ────────────────────────────────────────────────────────────
+# BLOG ARTICLE FILTERS — Skip these, they are NOT real deals
+# ────────────────────────────────────────────────────────────
+BLOG_PATTERNS = [
+    r'^top\s+\d+',           # "Top 15 deals..."
+    r'^best\s+\d+',          # "Best 10 products..."
+    r'biggest sales',
+    r'you can\'t miss',
+    r'shop smarter',
+    r'step into style',
+    r'light up your',
+    r'how to',
+    r'guide to',
+    r'tips for',
+    r'ways to',
+    r'things you',
+    r'reasons why',
+    r'everything you',
+    r'all you need',
+    r'what is',
+    r'why you should',
+    r'festival.*deals',      # "Diwali deals guide"
+    r'sale.*\d{4}',          # "Big Billion Days 2025"
+    r'\d+ deals',            # "15 deals you..."
+    r'\d+ things',
+    r'\d+ best',
+    r'\d+ ways',
+]
 
+def is_blog_article(title: str) -> bool:
+    t = title.lower().strip()
+    return any(re.search(p, t) for p in BLOG_PATTERNS)
+
+# ────────────────────────────────────────────────────────────
+# REAL DEAL INDICATORS — Must have at least one of these
+# ────────────────────────────────────────────────────────────
+def is_real_product_deal(title: str, desc: str) -> bool:
+    combined = (title + " " + desc).lower()
+    # Must mention price or discount
+    has_price    = bool(re.search(r'₹|rs\.|inr|rupee', combined))
+    has_discount = bool(re.search(r'\d+\s*%\s*off|discount|deal price|loot', combined))
+    has_platform = "amazon" in combined or "flipkart" in combined
+    return (has_price or has_discount) and has_platform
 
 # ────────────────────────────────────────────────────────────
 # HELPERS
@@ -32,26 +73,19 @@ def extract_prices_inr(text: str) -> list:
         for m in re.findall(pattern, text):
             try:
                 val = int(m.replace(",", ""))
-                if 10 < val < 10000000:  # Filter out junk numbers
+                if 50 < val < 5000000:
                     prices.append(val)
             except:
                 pass
     return sorted(set(prices))
 
-def get_platform(text: str) -> str:
-    t = text.lower()
-    if "flipkart" in t:
-        return "Flipkart"
-    return "Amazon India"
-
-def is_deal_article(text: str) -> bool:
-    deal_words = ["deal", "offer", "discount", "% off", "sale", "price drop", "loot", "buy"]
-    return any(w in text.lower() for w in deal_words)
-
 def calculate_discount(deal_price, original_price) -> int:
     if deal_price and original_price and original_price > deal_price:
         return int(((original_price - deal_price) / original_price) * 100)
     return 0
+
+def get_platform(text: str) -> str:
+    return "Flipkart" if "flipkart" in text.lower() else "Amazon India"
 
 def send_to_telegram(message: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -71,37 +105,46 @@ def send_to_telegram(message: str):
 
 
 # ────────────────────────────────────────────────────────────
-# SOURCE 1 — Desidime RSS (Best India Deal Source!)
-# Real Amazon.in + Flipkart deals posted by Indian users
-# With actual product names, MRP and deal prices in ₹
+# DESIDIME — India's Biggest Real Deal Community
+# People post actual products with MRP, deal price, % off
+# Example: "boAt Airdopes 141 at ₹999 (MRP ₹4499) 78% off Amazon"
 # ────────────────────────────────────────────────────────────
 def fetch_desidime() -> list:
-    print("\n🔍 Fetching Desidime deals...")
+    print("\n🔍 Fetching Desidime real product deals...")
     deals = []
 
-    # Multiple category RSS feeds from Desidime
-    rss_feeds = [
-        "https://www.desidime.com/deals.rss",                          # All deals
-        "https://www.desidime.com/selective_search/electronics.rss",    # Electronics
-        "https://www.desidime.com/selective_search/mobiles.rss",        # Mobiles
-        "https://www.desidime.com/selective_search/fashion.rss",        # Fashion
-        "https://www.desidime.com/selective_search/home-kitchen.rss",   # Home & Kitchen
-        "https://www.desidime.com/selective_search/freebies.rss",       # Freebies/Loot
+    feeds = [
+        ("All Deals",      "https://www.desidime.com/deals.rss"),
+        ("Electronics",    "https://www.desidime.com/selective_search/electronics.rss"),
+        ("Mobiles",        "https://www.desidime.com/selective_search/mobiles.rss"),
+        ("Fashion",        "https://www.desidime.com/selective_search/fashion.rss"),
+        ("Home Kitchen",   "https://www.desidime.com/selective_search/home-kitchen.rss"),
+        ("Freebies",       "https://www.desidime.com/selective_search/freebies.rss"),
+        ("Grocery",        "https://www.desidime.com/selective_search/grocery.rss"),
+        ("Sports",         "https://www.desidime.com/selective_search/sports-fitness.rss"),
     ]
 
-    for feed_url in rss_feeds:
+    for name, url in feeds:
         try:
-            r    = requests.get(feed_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+            r    = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
             soup = BeautifulSoup(r.text, "xml")
             items = soup.find_all("item")
-            print(f"   {feed_url.split('/')[-1]} → {len(items)} items")
+            print(f"   [{name}] → {len(items)} items")
 
             for item in items:
                 try:
-                    title    = item.find("title").get_text(strip=True)      if item.find("title")       else ""
-                    link     = item.find("link").get_text(strip=True)        if item.find("link")        else ""
-                    desc     = item.find("description").get_text(strip=True) if item.find("description") else ""
+                    title = item.find("title").get_text(strip=True)      if item.find("title")       else ""
+                    link  = item.find("link").get_text(strip=True)        if item.find("link")        else ""
+                    desc  = item.find("description").get_text(strip=True) if item.find("description") else ""
                     combined = title + " " + desc
+
+                    # ✅ STRICT FILTERS — Skip blog articles
+                    if is_blog_article(title):
+                        continue
+
+                    # ✅ Must be a real product deal
+                    if not is_real_product_deal(title, desc):
+                        continue
 
                     discount = extract_discount(combined)
                     prices   = extract_prices_inr(combined)
@@ -109,7 +152,6 @@ def fetch_desidime() -> list:
                     deal_price     = prices[0]  if len(prices) >= 1 else None
                     original_price = prices[-1] if len(prices) >= 2 else None
 
-                    # Calculate discount from prices if not mentioned explicitly
                     if discount == 0 and deal_price and original_price:
                         discount = calculate_discount(deal_price, original_price)
 
@@ -120,169 +162,16 @@ def fetch_desidime() -> list:
                         "deal_price"    : deal_price,
                         "original_price": original_price,
                         "platform"      : get_platform(combined),
-                        "source"        : "Desidime"
+                        "source"        : f"Desidime/{name}"
                     })
+
                 except:
                     continue
 
         except Exception as e:
-            print(f"   ❌ Error {feed_url}: {e}")
+            print(f"   ❌ {name} error: {e}")
 
-    print(f"   ✅ Desidime total — {len(deals)} deals collected")
-    return deals
-
-
-# ────────────────────────────────────────────────────────────
-# SOURCE 2 — Coupondunia India
-# Real Amazon.in + Flipkart product deals with prices in ₹
-# ────────────────────────────────────────────────────────────
-def fetch_coupondunia() -> list:
-    print("\n🔍 Fetching Coupondunia deals...")
-    deals = []
-    try:
-        r    = requests.get("https://coupondunia.in/blog/feed/",
-                            headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-        soup = BeautifulSoup(r.text, "xml")
-        items = soup.find_all("item")
-        print(f"   Found {len(items)} items")
-
-        for item in items:
-            try:
-                title    = item.find("title").get_text(strip=True)      if item.find("title")       else ""
-                link     = item.find("link").get_text(strip=True)        if item.find("link")        else ""
-                desc     = item.find("description").get_text(strip=True) if item.find("description") else ""
-                combined = title + " " + desc
-
-                # Skip if not a deal article
-                if not is_deal_article(combined):
-                    continue
-
-                discount = extract_discount(combined)
-                prices   = extract_prices_inr(combined)
-
-                deal_price     = prices[0]  if len(prices) >= 1 else None
-                original_price = prices[-1] if len(prices) >= 2 else None
-
-                if discount == 0 and deal_price and original_price:
-                    discount = calculate_discount(deal_price, original_price)
-
-                deals.append({
-                    "title"         : title[:80],
-                    "link"          : link,
-                    "discount"      : discount,
-                    "deal_price"    : deal_price,
-                    "original_price": original_price,
-                    "platform"      : get_platform(combined),
-                    "source"        : "Coupondunia"
-                })
-            except:
-                continue
-
-    except Exception as e:
-        print(f"   ❌ Coupondunia error: {e}")
-
-    print(f"   ✅ Coupondunia — {len(deals)} deals collected")
-    return deals
-
-
-# ────────────────────────────────────────────────────────────
-# SOURCE 3 — GrabOn India
-# Amazon.in + Flipkart deals, coupons, offers in ₹
-# ────────────────────────────────────────────────────────────
-def fetch_grabon() -> list:
-    print("\n🔍 Fetching GrabOn deals...")
-    deals = []
-    try:
-        r    = requests.get("https://www.grabon.in/indias-best-deals/feed/",
-                            headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-        soup = BeautifulSoup(r.text, "xml")
-        items = soup.find_all("item")
-        print(f"   Found {len(items)} items")
-
-        for item in items:
-            try:
-                title    = item.find("title").get_text(strip=True)      if item.find("title")       else ""
-                link     = item.find("link").get_text(strip=True)        if item.find("link")        else ""
-                desc     = item.find("description").get_text(strip=True) if item.find("description") else ""
-                combined = title + " " + desc
-
-                if not is_deal_article(combined):
-                    continue
-
-                discount = extract_discount(combined)
-                prices   = extract_prices_inr(combined)
-
-                deal_price     = prices[0]  if len(prices) >= 1 else None
-                original_price = prices[-1] if len(prices) >= 2 else None
-
-                if discount == 0 and deal_price and original_price:
-                    discount = calculate_discount(deal_price, original_price)
-
-                deals.append({
-                    "title"         : title[:80],
-                    "link"          : link,
-                    "discount"      : discount,
-                    "deal_price"    : deal_price,
-                    "original_price": original_price,
-                    "platform"      : get_platform(combined),
-                    "source"        : "GrabOn"
-                })
-            except:
-                continue
-
-    except Exception as e:
-        print(f"   ❌ GrabOn error: {e}")
-
-    print(f"   ✅ GrabOn — {len(deals)} deals collected")
-    return deals
-
-
-# ────────────────────────────────────────────────────────────
-# SOURCE 4 — 91mobiles Deals RSS
-# Only deal articles — mobiles + electronics on Amazon/Flipkart
-# ────────────────────────────────────────────────────────────
-def fetch_91mobiles() -> list:
-    print("\n🔍 Fetching 91mobiles deals...")
-    deals = []
-    try:
-        r    = requests.get("https://www.91mobiles.com/hub/deals/feed/",
-                            headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-        soup = BeautifulSoup(r.text, "xml")
-        items = soup.find_all("item")
-        print(f"   Found {len(items)} items")
-
-        for item in items:
-            try:
-                title    = item.find("title").get_text(strip=True)      if item.find("title")       else ""
-                link     = item.find("link").get_text(strip=True)        if item.find("link")        else ""
-                desc     = item.find("description").get_text(strip=True) if item.find("description") else ""
-                combined = title + " " + desc
-
-                discount = extract_discount(combined)
-                prices   = extract_prices_inr(combined)
-
-                deal_price     = prices[0]  if len(prices) >= 1 else None
-                original_price = prices[-1] if len(prices) >= 2 else None
-
-                if discount == 0 and deal_price and original_price:
-                    discount = calculate_discount(deal_price, original_price)
-
-                deals.append({
-                    "title"         : title[:80],
-                    "link"          : link,
-                    "discount"      : discount,
-                    "deal_price"    : deal_price,
-                    "original_price": original_price,
-                    "platform"      : get_platform(combined),
-                    "source"        : "91mobiles"
-                })
-            except:
-                continue
-
-    except Exception as e:
-        print(f"   ❌ 91mobiles error: {e}")
-
-    print(f"   ✅ 91mobiles — {len(deals)} deals collected")
+    print(f"\n   ✅ Total real deals from Desidime: {len(deals)}")
     return deals
 
 
@@ -319,25 +208,22 @@ def send_top5(deals: list):
 # ────────────────────────────────────────────────────────────
 def main():
     print("\n" + "="*50)
-    print("🚀 India Deal Finder Started!")
+    print("🚀 India Deal Finder — Real Products Only!")
+    print(f"   Source    : Desidime (Real community deals)")
     print(f"   Market    : Amazon India + Flipkart (₹ only)")
-    print(f"   Top Deals : Top {TOP_DEALS_COUNT} per run — 1 message only")
+    print(f"   Filter    : Blog articles removed automatically")
+    print(f"   Top Deals : {TOP_DEALS_COUNT} per run — 1 Telegram message")
     print(f"   Channel   : {TELEGRAM_CHANNEL_ID}")
     print("="*50)
 
-    # Collect from all proper India deal sources
-    all_deals = []
-    all_deals += fetch_desidime()    # Best source — real community deals
-    all_deals += fetch_91mobiles()   # Tech deals
-    all_deals += fetch_coupondunia() # India deals site
-    all_deals += fetch_grabon()      # India deals site
+    all_deals = fetch_desidime()
 
-    print(f"\n📊 Total deals collected from all sources: {len(all_deals)}")
+    print(f"\n📊 Real product deals collected: {len(all_deals)}")
 
     if not all_deals:
         send_to_telegram(
             "ℹ️ <b>Scan Complete!</b>\n"
-            "No deals found this round.\n"
+            "No product deals found this round.\n"
             "🕐 Will check again in 6 hours!"
         )
         return
@@ -345,7 +231,7 @@ def main():
     # Sort by highest discount first
     all_deals.sort(key=lambda x: x["discount"], reverse=True)
 
-    # Remove duplicates by title
+    # Remove duplicate titles
     seen, unique = set(), []
     for deal in all_deals:
         key = deal["title"][:25].lower().strip()
@@ -353,12 +239,11 @@ def main():
             seen.add(key)
             unique.append(deal)
 
-    # Pick top 5
     top5 = unique[:TOP_DEALS_COUNT]
 
     print(f"\n🏆 Top {len(top5)} deals selected:")
     for i, d in enumerate(top5, 1):
-        print(f"   {i}. {d['discount']}% off — {d['title'][:50]} [{d['source']}]")
+        print(f"   {i}. {d['discount']}% off — {d['title'][:55]}")
 
     send_top5(top5)
 
