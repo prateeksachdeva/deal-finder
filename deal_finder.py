@@ -1,58 +1,24 @@
 import requests
 from bs4 import BeautifulSoup
 import os
-import time
 import re
+import time
 
 # ============================================================
 #   CONFIGURATION — Loaded from GitHub Secrets automatically
 # ============================================================
 TELEGRAM_BOT_TOKEN  = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID", "")
-MIN_DISCOUNT        = 60   # Minimum discount % to post
+MIN_DISCOUNT        = 60   # Minimum discount %
+TOP_DEALS_COUNT     = 5    # Only post top 5 deals per run
 # ============================================================
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                   "AppleWebKit/537.36 (KHTML, like Gecko) "
                   "Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Language": "en-IN,en;q=0.9",
 }
-
-# Avoid posting same deal twice in one run
-posted_deals = set()
-
-# Keywords that indicate a heavy deal even without % mentioned
-DEAL_KEYWORDS = [
-    "loot deal", "loot price", "free", "lowest ever", "lowest price",
-    "all time low", "best price ever", "historically low", "massive discount",
-    "huge discount", "bumper discount", "flat off", "steal deal"
-]
-
-
-# ────────────────────────────────────────────────────────────
-# TELEGRAM — Send message to channel
-# ────────────────────────────────────────────────────────────
-def send_to_telegram(message: str):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHANNEL_ID,
-        "text": message,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": False,
-    }
-    try:
-        response = requests.post(url, json=payload, timeout=10)
-        if response.status_code == 200:
-            print("   ✅ Sent to Telegram!")
-            return True
-        else:
-            print(f"   ❌ Telegram Error: {response.text}")
-            return False
-    except Exception as e:
-        print(f"   ❌ Telegram Exception: {e}")
-        return False
 
 
 # ────────────────────────────────────────────────────────────
@@ -62,277 +28,244 @@ def extract_discount(text: str) -> int:
     """Extract highest discount % from text"""
     matches = re.findall(r'(\d{1,3})\s*%\s*off', text.lower())
     if matches:
-        return max(int(m) for m in matches if int(m) <= 99)
+        return max(int(m) for m in matches if int(m) <= 95)
     return 0
 
-def is_deal_keyword(text: str) -> bool:
-    """Check if text contains heavy deal keywords"""
-    text_lower = text.lower()
-    return any(k in text_lower for k in DEAL_KEYWORDS)
+def extract_price_inr(text: str) -> list:
+    """Extract ₹ prices from text"""
+    prices = []
+    for pattern in [r'₹\s*([\d,]+)', r'Rs\.?\s*([\d,]+)', r'INR\s*([\d,]+)']:
+        for m in re.findall(pattern, text):
+            try:
+                prices.append(int(m.replace(",", "")))
+            except:
+                pass
+    return sorted(prices)
 
-def is_indian_platform(text: str) -> bool:
-    """Check if deal is from Amazon or Flipkart"""
-    text_lower = text.lower()
-    return "amazon" in text_lower or "flipkart" in text_lower or "amazon.in" in text_lower
+def is_india_deal(text: str) -> bool:
+    """Only Amazon.in or Flipkart deals"""
+    t = text.lower()
+    return "amazon.in" in t or "amazon india" in t or "flipkart" in t or "amazon" in t
 
 def get_platform(text: str) -> str:
-    text_lower = text.lower()
-    if "flipkart" in text_lower:
+    t = text.lower()
+    if "flipkart" in t:
         return "Flipkart"
-    if "amazon" in text_lower:
-        return "Amazon India"
-    return "Online Store"
-
-def already_posted(key: str) -> bool:
-    if key in posted_deals:
-        return True
-    posted_deals.add(key)
-    return False
+    return "Amazon India"
 
 
 # ────────────────────────────────────────────────────────────
-# SOURCE 1 — Smartprix RSS (Fixed — smarter filtering)
-# Found 30 items last time! Now we extract deals properly
+# TELEGRAM — Send ONE message with all top 5 deals
 # ────────────────────────────────────────────────────────────
-def scrape_smartprix():
-    print("\n🔍 Scanning Smartprix...")
-    found = 0
+def send_top5_to_telegram(deals: list):
+    """Send all top 5 deals in a single nicely formatted message"""
 
+    message = "🇮🇳 <b>TOP 5 DEALS TODAY — India</b>\n"
+    message += "━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+    for i, deal in enumerate(deals, 1):
+        emoji = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "🔥"
+        message += f"{emoji} <b>#{i} — {deal['platform']}</b>\n"
+        message += f"📦 {deal['title']}\n"
+
+        if deal['original_price'] and deal['deal_price']:
+            message += f"🏷️ MRP: <s>₹{deal['original_price']:,}</s>\n"
+            message += f"💰 Price: <b>₹{deal['deal_price']:,}</b>\n"
+
+        message += f"📉 Discount: <b>{deal['discount']}% OFF</b>\n"
+        message += f"🛒 <a href='{deal['link']}'>Buy Now →</a>\n"
+        message += "━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+    message += "⏰ <i>Next scan in 6 hours!</i>"
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHANNEL_ID,
+        "text": message,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
     try:
-        response = requests.get(
-            "https://www.smartprix.com/feed",
-            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/rss+xml"},
-            timeout=15
-        )
-        soup = BeautifulSoup(response.text, "xml")
-        items = soup.find_all("item")
-        print(f"   Found {len(items)} items")
-
-        for item in items:
-            try:
-                title   = item.find("title").get_text(strip=True)       if item.find("title")       else ""
-                link    = item.find("link").get_text(strip=True)         if item.find("link")        else ""
-                desc    = item.find("description").get_text(strip=True)  if item.find("description") else ""
-                combined = title + " " + desc
-
-                discount = extract_discount(combined)
-                is_loot  = is_deal_keyword(combined)
-
-                # Accept if 60%+ discount OR strong deal keywords found
-                if discount < MIN_DISCOUNT and not is_loot:
-                    continue
-
-                if already_posted(title[:40]):
-                    continue
-
-                platform     = get_platform(combined)
-                emoji        = "🔥" if discount >= 70 else "💥"
-                discount_txt = f"<b>{discount}% OFF</b>" if discount > 0 else "<b>🔥 Heavy Discount!</b>"
-
-                message = (
-                    f"{emoji} <b>DEAL — Smartprix</b>\n\n"
-                    f"📦 <b>{title}</b>\n\n"
-                    f"📉 {discount_txt}\n"
-                    f"🏪 Platform: {platform}\n\n"
-                    f"🛒 <a href='{link}'>Check Deal →</a>"
-                )
-                send_to_telegram(message)
-                found += 1
-                time.sleep(2)
-
-            except Exception:
-                continue
-
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code == 200:
+            print("✅ Top 5 deals sent to Telegram!")
+        else:
+            print(f"❌ Telegram Error: {response.text}")
     except Exception as e:
-        print(f"   ❌ Smartprix error: {e}")
+        print(f"❌ Exception: {e}")
 
-    print(f"   ✅ Smartprix done — {found} deals posted")
-    return found
-
-
-# ────────────────────────────────────────────────────────────
-# SOURCE 2 — Slickdeals RSS (Global, always works!)
-# Huge deal community, many India Amazon deals posted here
-# ────────────────────────────────────────────────────────────
-def scrape_slickdeals():
-    print("\n🔍 Scanning Slickdeals...")
-    found = 0
-
-    rss_urls = [
-        "https://slickdeals.net/newsearch.php?mode=frontpage&searcharea=deals&searchin=first&rss=1",
-        "https://slickdeals.net/newsearch.php?mode=frontpage&searcharea=deals&searchin=first&rss=1&q=amazon",
-    ]
-
-    for rss_url in rss_urls:
-        try:
-            response = requests.get(
-                rss_url,
-                headers={"User-Agent": "Mozilla/5.0", "Accept": "application/rss+xml"},
-                timeout=15
-            )
-            soup = BeautifulSoup(response.text, "xml")
-            items = soup.find_all("item")
-            print(f"   Found {len(items)} deals")
-
-            for item in items:
-                try:
-                    title   = item.find("title").get_text(strip=True)      if item.find("title")       else ""
-                    link    = item.find("link").get_text(strip=True)        if item.find("link")        else ""
-                    desc    = item.find("description").get_text(strip=True) if item.find("description") else ""
-                    combined = title + " " + desc
-
-                    discount = extract_discount(combined)
-                    is_loot  = is_deal_keyword(combined)
-
-                    if discount < MIN_DISCOUNT and not is_loot:
-                        continue
-
-                    if already_posted(title[:40]):
-                        continue
-
-                    emoji        = "🔥" if discount >= 70 else "💥"
-                    discount_txt = f"<b>{discount}% OFF</b>" if discount > 0 else "<b>Heavy Discount!</b>"
-
-                    message = (
-                        f"{emoji} <b>DEAL — Slickdeals</b>\n\n"
-                        f"📦 <b>{title}</b>\n\n"
-                        f"📉 {discount_txt}\n\n"
-                        f"🛒 <a href='{link}'>Grab Deal →</a>"
-                    )
-                    send_to_telegram(message)
-                    found += 1
-                    time.sleep(2)
-
-                except Exception:
-                    continue
-
-        except Exception as e:
-            print(f"   ❌ Slickdeals error: {e}")
-
-    print(f"   ✅ Slickdeals done — {found} deals posted")
-    return found
+def send_simple(message: str):
+    """Send a simple notification message"""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    requests.post(url, json={
+        "chat_id": TELEGRAM_CHANNEL_ID,
+        "text": message,
+        "parse_mode": "HTML"
+    }, timeout=10)
 
 
 # ────────────────────────────────────────────────────────────
-# SOURCE 3 — Cashkaro Blog RSS
-# Indian cashback site — posts Amazon & Flipkart deals daily
+# SOURCE 1 — Cashkaro India RSS
+# India's biggest cashback site — Amazon.in + Flipkart deals
 # ────────────────────────────────────────────────────────────
-def scrape_cashkaro():
-    print("\n🔍 Scanning Cashkaro deals...")
-    found = 0
-
+def fetch_cashkaro() -> list:
+    print("\n🔍 Fetching Cashkaro deals...")
+    deals = []
     try:
         response = requests.get(
             "https://cashkaro.com/blog/feed",
-            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/rss+xml"},
+            headers={"User-Agent": "Mozilla/5.0"},
             timeout=15
         )
-        soup = BeautifulSoup(response.text, "xml")
+        soup  = BeautifulSoup(response.text, "xml")
         items = soup.find_all("item")
-        print(f"   Found {len(items)} items")
+        print(f"   Found {len(items)} articles")
 
         for item in items:
             try:
-                title   = item.find("title").get_text(strip=True)      if item.find("title")       else ""
-                link    = item.find("link").get_text(strip=True)        if item.find("link")        else ""
-                desc    = item.find("description").get_text(strip=True) if item.find("description") else ""
+                title    = item.find("title").get_text(strip=True)       if item.find("title")       else ""
+                link     = item.find("link").get_text(strip=True)         if item.find("link")        else ""
+                desc     = item.find("description").get_text(strip=True)  if item.find("description") else ""
                 combined = title + " " + desc
 
+                if not is_india_deal(combined):
+                    continue
+
                 discount = extract_discount(combined)
-                is_loot  = is_deal_keyword(combined)
-
-                if discount < MIN_DISCOUNT and not is_loot:
+                if discount < MIN_DISCOUNT:
                     continue
 
-                if already_posted(title[:40]):
-                    continue
+                prices        = extract_price_inr(combined)
+                deal_price    = prices[0]  if len(prices) >= 1 else None
+                original_price = prices[-1] if len(prices) >= 2 else None
 
-                platform     = get_platform(combined)
-                emoji        = "🔥" if discount >= 70 else "💰"
-                discount_txt = f"<b>{discount}% OFF</b>" if discount > 0 else "<b>Big Savings!</b>"
-
-                message = (
-                    f"{emoji} <b>DEAL — Cashkaro</b>\n\n"
-                    f"📦 <b>{title}</b>\n\n"
-                    f"📉 {discount_txt}\n"
-                    f"🏪 Platform: {platform}\n\n"
-                    f"🛒 <a href='{link}'>Shop Now →</a>"
-                )
-                send_to_telegram(message)
-                found += 1
-                time.sleep(2)
-
-            except Exception:
+                deals.append({
+                    "title"         : title[:80],
+                    "link"          : link,
+                    "discount"      : discount,
+                    "deal_price"    : deal_price,
+                    "original_price": original_price,
+                    "platform"      : get_platform(combined),
+                    "source"        : "Cashkaro"
+                })
+            except:
                 continue
 
     except Exception as e:
         print(f"   ❌ Cashkaro error: {e}")
 
-    print(f"   ✅ Cashkaro done — {found} deals posted")
-    return found
+    print(f"   ✅ Cashkaro — {len(deals)} qualifying deals found")
+    return deals
 
 
 # ────────────────────────────────────────────────────────────
-# SOURCE 4 — GizChina / 91mobiles RSS
-# Tech deals — mobiles, electronics, gadgets
+# SOURCE 2 — Smartprix RSS
+# Tracks Amazon.in + Flipkart price drops in ₹
 # ────────────────────────────────────────────────────────────
-def scrape_91mobiles():
-    print("\n🔍 Scanning 91mobiles deals...")
-    found = 0
-
+def fetch_smartprix() -> list:
+    print("\n🔍 Fetching Smartprix deals...")
+    deals = []
     try:
         response = requests.get(
-            "https://www.91mobiles.com/hub/feed/",
-            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/rss+xml"},
+            "https://www.smartprix.com/feed",
+            headers={"User-Agent": "Mozilla/5.0"},
             timeout=15
         )
-        soup = BeautifulSoup(response.text, "xml")
+        soup  = BeautifulSoup(response.text, "xml")
         items = soup.find_all("item")
         print(f"   Found {len(items)} items")
 
         for item in items:
             try:
-                title   = item.find("title").get_text(strip=True)      if item.find("title")       else ""
-                link    = item.find("link").get_text(strip=True)        if item.find("link")        else ""
-                desc    = item.find("description").get_text(strip=True) if item.find("description") else ""
+                title    = item.find("title").get_text(strip=True)       if item.find("title")       else ""
+                link     = item.find("link").get_text(strip=True)         if item.find("link")        else ""
+                desc     = item.find("description").get_text(strip=True)  if item.find("description") else ""
+                combined = title + " " + desc
+
+                discount = extract_discount(combined)
+                if discount < MIN_DISCOUNT:
+                    continue
+
+                prices         = extract_price_inr(combined)
+                deal_price     = prices[0]   if len(prices) >= 1 else None
+                original_price = prices[-1]  if len(prices) >= 2 else None
+
+                # Only include if prices are in ₹ (Indian market)
+                if not prices and not is_india_deal(combined):
+                    continue
+
+                deals.append({
+                    "title"         : title[:80],
+                    "link"          : link,
+                    "discount"      : discount,
+                    "deal_price"    : deal_price,
+                    "original_price": original_price,
+                    "platform"      : get_platform(combined),
+                    "source"        : "Smartprix"
+                })
+            except:
+                continue
+
+    except Exception as e:
+        print(f"   ❌ Smartprix error: {e}")
+
+    print(f"   ✅ Smartprix — {len(deals)} qualifying deals found")
+    return deals
+
+
+# ────────────────────────────────────────────────────────────
+# SOURCE 3 — 91mobiles RSS
+# Indian tech site — posts Amazon.in + Flipkart deals in ₹
+# ────────────────────────────────────────────────────────────
+def fetch_91mobiles() -> list:
+    print("\n🔍 Fetching 91mobiles deals...")
+    deals = []
+    try:
+        response = requests.get(
+            "https://www.91mobiles.com/hub/feed/",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=15
+        )
+        soup  = BeautifulSoup(response.text, "xml")
+        items = soup.find_all("item")
+        print(f"   Found {len(items)} items")
+
+        for item in items:
+            try:
+                title    = item.find("title").get_text(strip=True)       if item.find("title")       else ""
+                link     = item.find("link").get_text(strip=True)         if item.find("link")        else ""
+                desc     = item.find("description").get_text(strip=True)  if item.find("description") else ""
                 combined = title + " " + desc
 
                 # Only deal/offer articles
-                deal_indicators = ["deal", "offer", "discount", "sale", "off", "price drop", "price cut"]
-                if not any(d in combined.lower() for d in deal_indicators):
+                if not any(d in combined.lower() for d in ["deal", "offer", "discount", "off", "sale"]):
                     continue
 
                 discount = extract_discount(combined)
-                is_loot  = is_deal_keyword(combined)
-
-                if discount < MIN_DISCOUNT and not is_loot:
+                if discount < MIN_DISCOUNT:
                     continue
 
-                if already_posted(title[:40]):
-                    continue
+                prices         = extract_price_inr(combined)
+                deal_price     = prices[0]  if len(prices) >= 1 else None
+                original_price = prices[-1] if len(prices) >= 2 else None
 
-                platform     = get_platform(combined)
-                discount_txt = f"<b>{discount}% OFF</b>" if discount > 0 else "<b>Great Deal!</b>"
-
-                message = (
-                    f"📱 <b>TECH DEAL — 91mobiles</b>\n\n"
-                    f"📦 <b>{title}</b>\n\n"
-                    f"📉 {discount_txt}\n"
-                    f"🏪 Platform: {platform}\n\n"
-                    f"🛒 <a href='{link}'>See Deal →</a>"
-                )
-                send_to_telegram(message)
-                found += 1
-                time.sleep(2)
-
-            except Exception:
+                deals.append({
+                    "title"         : title[:80],
+                    "link"          : link,
+                    "discount"      : discount,
+                    "deal_price"    : deal_price,
+                    "original_price": original_price,
+                    "platform"      : get_platform(combined),
+                    "source"        : "91mobiles"
+                })
+            except:
                 continue
 
     except Exception as e:
         print(f"   ❌ 91mobiles error: {e}")
 
-    print(f"   ✅ 91mobiles done — {found} deals posted")
-    return found
+    print(f"   ✅ 91mobiles — {len(deals)} qualifying deals found")
+    return deals
 
 
 # ────────────────────────────────────────────────────────────
@@ -340,39 +273,50 @@ def scrape_91mobiles():
 # ────────────────────────────────────────────────────────────
 def main():
     print("\n" + "="*50)
-    print("🚀 Deal Finder Bot Started!")
-    print(f"   Minimum Discount : {MIN_DISCOUNT}%")
-    print(f"   Posting to       : {TELEGRAM_CHANNEL_ID}")
+    print("🚀 India Deal Finder Started!")
+    print(f"   Market          : India Only (₹)")
+    print(f"   Min Discount    : {MIN_DISCOUNT}%")
+    print(f"   Top Deals       : {TOP_DEALS_COUNT} per run")
+    print(f"   Posting to      : {TELEGRAM_CHANNEL_ID}")
     print("="*50)
 
-    send_to_telegram(
-        "🤖 <b>Deal Bot Scanning...</b>\n"
-        "📡 Sources: Smartprix | Slickdeals | Cashkaro | 91mobiles\n"
-        "🎯 Filter: 60%+ OFF deals only!"
-    )
+    # Collect all deals from all sources
+    all_deals = []
+    all_deals += fetch_cashkaro()
+    all_deals += fetch_smartprix()
+    all_deals += fetch_91mobiles()
 
-    total  = 0
-    total += scrape_smartprix()
-    total += scrape_slickdeals()
-    total += scrape_cashkaro()
-    total += scrape_91mobiles()
+    print(f"\n📊 Total deals found across all sources: {len(all_deals)}")
 
-    print(f"\n{'='*50}")
-    print(f"✅ Done! {total} deals posted to Telegram.")
-    print(f"{'='*50}")
-
-    if total == 0:
-        send_to_telegram(
+    if not all_deals:
+        send_simple(
             "ℹ️ <b>Scan Complete!</b>\n"
-            "No new deals above 60% found this round.\n"
+            "No deals above 60% found this round.\n"
             "🕐 Will check again in 6 hours!"
         )
-    else:
-        send_to_telegram(
-            f"✅ <b>Scan Complete!</b>\n"
-            f"Posted <b>{total} deals</b> above 60% off!\n"
-            f"🕐 Next scan in 6 hours!"
-        )
+        return
+
+    # Sort by discount % — highest first
+    all_deals.sort(key=lambda x: x["discount"], reverse=True)
+
+    # Remove duplicates by title
+    seen   = set()
+    unique = []
+    for deal in all_deals:
+        key = deal["title"][:30].lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(deal)
+
+    # Pick only top 5
+    top5 = unique[:TOP_DEALS_COUNT]
+
+    print(f"\n🏆 Top {len(top5)} deals selected:")
+    for i, d in enumerate(top5, 1):
+        print(f"   {i}. {d['discount']}% off — {d['title'][:50]} [{d['source']}]")
+
+    # Send as ONE message to Telegram
+    send_top5_to_telegram(top5)
 
 
 if __name__ == "__main__":
